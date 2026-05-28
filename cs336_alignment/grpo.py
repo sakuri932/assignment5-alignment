@@ -503,6 +503,7 @@ def grpo_train_step(
 
     optimizer.zero_grad(set_to_none=True)
     total_loss_val = 0.0
+    clip_fraction_val = None
 
     for step_i in range(gradient_accumulation_steps):
         s = step_i * microbatch_size
@@ -525,7 +526,7 @@ def grpo_train_step(
         policy_lp = lp_dict["log_probs"]
 
         # 计算 per-token 策略梯度 loss
-        per_token_loss, _ = compute_policy_gradient_loss(
+        per_token_loss, pg_meta = compute_policy_gradient_loss(
             raw_rewards_or_advantages=mb_advantages,
             policy_log_probs=policy_lp,
             importance_reweighting_method=importance_reweighting_method,
@@ -533,6 +534,8 @@ def grpo_train_step(
             cliprange=cliprange,
             response_mask=mb_response_mask,
         )
+        if "clip_fraction" in pg_meta:
+            clip_fraction_val = pg_meta["clip_fraction"]
 
         # 聚合为标量
         mb_loss = aggregate_loss_across_microbatch(
@@ -572,4 +575,6 @@ def grpo_train_step(
         **reward_meta,
         **reward_stats,
     }
+    if clip_fraction_val is not None:
+        metadata["clip_fraction"] = clip_fraction_val
     return torch.tensor(total_loss_val), metadata

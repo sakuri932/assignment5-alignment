@@ -47,11 +47,13 @@ def _response_log_prob_sum(
 
     full_ids = p_ids + r_ids
     n = len(full_ids)
-    input_ids = torch.tensor([full_ids[:-1]], dtype=torch.long)
-    labels    = torch.tensor([full_ids[1:],  ], dtype=torch.long)
+
+    device = next(model.parameters()).device
+    input_ids = torch.tensor([full_ids[:-1]], dtype=torch.long, device=device)
+    labels    = torch.tensor([full_ids[1:],  ], dtype=torch.long, device=device)
 
     # response_mask: labels 中位于 [len(p_ids)-1, n-2] 的位置
-    mask = torch.zeros(1, n - 1)
+    mask = torch.zeros(1, n - 1, device=device)
     mask[0, len(p_ids) - 1 : n - 1] = 1.0
 
     lp_dict = get_response_log_probs(model, input_ids, labels, return_token_entropy=False)
