@@ -81,7 +81,7 @@
 2. 用评分函数对这些响应评分
 3. 上调正确响应的概率，下调错误响应的概率
 
-在 RL 中，与预训练不同，我们不需要一个模仿的正确响应数据集——对于编程任务，我们不需要一个能解决该任务的正确 Python 程序；对于数学推理任务，我们不需要一个能产出正确答案的推理链。我们直接在模型准确率上求梯度，让模型通过 RL 自主学习。
+在 RL 中，与预训练不同，我们不需要一个模仿的正确响应数据集——对于编程任务，我们不需要一个能解决该任务的正确 Python 程序；对于数学推理任务，我们不需要一个能产出正确答案的推理链的训练集。我们直接让模型推理后评分，在模型准确率上求梯度，让模型通过 RL 自主学习。
 
 **RL 的挑战**：RL 速度慢、不稳定，且实现细节对结果影响极大。本次作业将介绍 LLM RL 并探索它的一些挑战。
 
@@ -169,11 +169,7 @@ class VLLMServer:
 除非另有说明，GSM8K 实验统一使用来自 DeepSeek R1-Zero 模型的以下提示（称为 `r1_zero`），位于 `cs336_alignment/prompts/r1_zero.prompt`：
 
 ```text
-A conversation between User and Assistant. The User asks a question, and the Assistant solves
-it. The Assistant first thinks about the reasoning process in the mind and then provides the
-User with the answer. The reasoning process is enclosed within <think> </think> and the
-answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning
-process here </think> <answer> answer here </answer>.
+A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first thinks about the reasoning process in the mind and then provides the User with the answer. The reasoning process is enclosed within <think> </think> and the answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>.
 User: {question}
 Assistant: <think>
 ```
@@ -187,11 +183,7 @@ Assistant: <think>
 少样本提示通过在实际问题前添加几个问答示例，帮助模型更好地理解任务。`r1_zero` 的三样本版本如下（位于 `cs336_alignment/prompts/r1_zero_three_shot_gsm8k.prompt`，示例来自 OLMES 数据集）：
 
 ```text
-A conversation between User and Assistant. The User asks a question, and the Assistant solves
-it. The Assistant first thinks about the reasoning process in the mind and then provides the
-User with the answer. The reasoning process is enclosed within <think> </think> and the
-answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning
-process here </think> <answer> answer here </answer>.
+A conversation between User and Assistant. The User asks a question, and the Assistant solves it. The Assistant first thinks about the reasoning process in the mind and then provides the User with the answer. The reasoning process is enclosed within <think> </think> and the answer is enclosed within <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think> <answer> answer here </answer>.
 User: {question-1}
 Assistant: <think> {reasoning-1} </think> <answer> {answer-1} </answer>
 User: {question-2}
@@ -325,23 +317,43 @@ $$
 J_\theta = E_{\tau \sim \pi_\theta}[r(\tau)], \tag{5}
 $$
 
-其中 $\tau \sim \pi_\theta$ 表示先从 $\rho$ 采样 $s_0$，再从策略逐步采样动作和状态。这等价于先采样数学问题 $x \sim \rho$，再采样 response $y \sim \pi_\theta(y \mid x)$，即前面的优化目标 (1)。
+其中 $\tau \sim \pi_\theta$ 表示先从 $\rho$ 采样 $s_0$，再从策略逐步采样动作和状态。在我们的设定中，这意味着先从数据集采样数学问题 $x \sim \rho$，再逐 token 采样直到 response 结束，记为 $y \sim \pi_\theta(y \mid x)$。该目标引出如下优化问题：
+
+$$
+\theta^* = \arg\max_\theta J_\theta. \tag{6}
+$$
 
 #### 4.1.4 策略梯度
 
-**目标**：对目标 $J_\theta = E_{x \sim \rho} E_{y \sim \pi_\theta(\cdot|x)}[r(y \mid x)]$ 做梯度上升：
+至此，我们已具备学习一种名为**策略梯度（policy gradients）**的 RL 算法所需的符号与定义。在作业的其余部分，我们将沿用语言模型记号 $(x, y)$ 表示 prompt 和 response，而非 RL 记号中的状态 $s_t$ 和动作 $a_t$。
+
+回顾我们要优化的是模型的期望奖励（即准确率）：
 
 $$
-\theta_{k+1} = \theta_k + \alpha \nabla_\theta J_{\theta_k}. \tag{8}
+J_\theta = E_{x \sim \rho} E_{y \sim \pi_\theta(y|x)}[r(y \mid x)], \tag{7}
 $$
 
-为此，需要从样本中估计梯度 $\nabla_\theta J_{\theta_k}$。将梯度重写为样本期望，得到 **REINFORCE 策略梯度**（以 REINFORCE 论文 R. J. Williams, 1992 命名）：
+其中 $r(y \mid x)$ 表示 response $y$ 对 prompt $x$ 是否正确。我们的方法是对该目标做梯度上升：
+
+$$
+\theta_{k+1} = \theta_k + \alpha \nabla_\theta J_{\theta_k}, \tag{8}
+$$
+
+但为此需要能从样本中估计梯度 $\nabla_\theta J_{\theta_k}$。将该梯度重写为对样本的期望，会得到一个被称为 **REINFORCE 策略梯度**的表达式（以 REINFORCE 论文 R. J. Williams, 1992 命名）。具体而言，我们可以把梯度改写为：
 
 $$
 \nabla_\theta E_{x \sim \rho} E_{y \sim \pi_\theta(y|x)}[r(y \mid x)] = E_{x \sim \rho} E_{y \sim \pi_\theta(y|x)}[r(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x)]. \tag{9}
 $$
 
-**推导**（利用对数导数技巧，即 $\nabla_\theta \log f = \frac{\nabla_\theta f}{f}$ 的逆用）：
+在走推导之前先注意，这个表达式蕴含了一个直观的算法（即 REINFORCE）：我们可以从数据集采样问题 $x$，从模型采样 response $y$，对这些样本计算 $r(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x)$ 的平均，然后走一步梯度。表达式 $r(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x)$ 的含义是：我们应当上调高奖励 response $y$ 的对数概率。若不断重复这一过程、走多步梯度，就得到了一个基本的强化学习训练循环。
+
+为推导 REINFORCE 策略梯度，可以使用对数导数技巧（回顾 $\log f(x)$ 的导数为 $\frac{f'(x)}{f(x)}$）：
+
+$$
+\nabla_\theta \pi_\theta(y \mid x) = \pi_\theta(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x). \tag{10}
+$$
+
+直接应用该恒等式即可得到所需结果：
 
 $$
 \begin{align}
@@ -350,6 +362,8 @@ $$
 &= E_{y \sim \pi_\theta(y|x)}[r(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x)]. \tag{13}
 \end{align}
 $$
+
+注意，上述各式中我们略去了对 prompt 的期望 $E_{x \sim \rho}$，因为 $\nabla_\theta$ 与 $E_{x \sim \rho}$ 可以交换次序。
 
 **直观理解**：$\nabla_\theta \log \pi_\theta(y \mid x)$ 恰好是将 response $y$ 视为 ground truth 时的 SFT 梯度——因此 REINFORCE 等价于用奖励加权的 SFT。
 
@@ -365,21 +379,31 @@ $$
 
 **高方差问题**：基本 REINFORCE 策略梯度估计器的期望是正确的 $\nabla_\theta J_\theta$，但方差很高，导致 RL 不稳定。稳定训练、降低方差的一个工具是**基线（baselines）**。
 
-最简单的基线是从奖励中减去一个常数 $b$：
+基线可以相当复杂，但最简单的基线是从奖励中减去一个常数 $b$：
 
 $$
 E_{x \sim \rho} E_{y \sim \pi_\theta(y|x)}[(r(y \mid x) - b) \nabla_\theta \log \pi_\theta(y \mid x)]. \tag{15}
 $$
 
-**关键数学性质**：只要基线 $b$ 不依赖于动作/response $y$（可以是常数、$x$ 的函数、策略的函数），减去它就不改变估计器的期望。这因为：
+例如，若减去 $b = 0.5$、且奖励 $r$ 是二元的（正确为 1、错误为 0），那么用这个估计器意味着：从模型采样 response，上调正确 response 的权重（权重 $+0.5$），下调错误 response 的权重（权重 $-0.5$）。这与我们原始的梯度估计器形成对比——后者把正确 response 上调权重 1、对错误 response 不作处理（权重 0）。
+
+**关键数学性质**：本节最关键的一条数学事实是：只要基线 $b$ 不依赖于动作/response $y$（例如它可以是常数、$x$ 的函数、或策略的函数），从估计器中减去它就不改变其期望：
 
 $$
-E_{y \sim \pi_\theta(y|x)}[\nabla_\theta \log \pi_\theta(y \mid x)] = \nabla_\theta \underbrace{\sum_y \pi_\theta(y \mid x)}_{=1} = 0. \tag{17}
+E_{x \sim \rho} E_{y \sim \pi_\theta(y|x)}[(r(y \mid x) - b) \nabla_\theta \log \pi_\theta(y \mid x)] = E_{x \sim \rho} E_{y \sim \pi_\theta(y|x)}[r(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x)]. \tag{16}
 $$
 
-因此，减去基线 $b$ 不改变梯度的**期望**，但可以显著降低**方差**。将 $A(x, y) = r(y \mid x) - b(x)$ 称为**优势（advantage）**。
+这一事实可由如下恒等式直接得到：
 
-例如，若减去 $b = 0.5$（二元奖励时），正确 response 权重变为 $+0.5$（被鼓励），错误 response 权重变为 $-0.5$（被抑制）——相比原始估计器（正确权重 1、错误权重 0），方差显著降低。
+$$
+E_{y \sim \pi_\theta(y|x)}[\nabla_\theta \log \pi_\theta(y \mid x)] = \nabla_\theta \underbrace{\sum_y \pi_\theta(y \mid x)}_{=1} = 0, \tag{17}
+$$
+
+其中第一步是把前面的对数导数技巧反向应用。
+
+虽然基线保持估计器的期望不变，但它可以增大或减小方差。这里"方差"的含义是：把策略梯度估计器写成样本均值 $\frac{1}{n} \sum_{i=1}^{n} Z_i$，其中每个 $Z_i$ 是某个样本 $(x, y)$ 上的表达式 $(r(y \mid x) - b) \nabla_\theta \log \pi_\theta(y \mid x)$，则估计器的方差为 $\frac{E[Z_i^2] - E[Z_i]^2}{n}$。我们将在下面这道题中探讨基线在何时增大、何时减小方差。
+
+将 $A(x, y) = r(y \mid x) - b(x)$ 称为**优势（advantage）**。
 
 ---
 
@@ -415,9 +439,18 @@ $$
 \hat{g} \leftarrow \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \big(r(y^{(i,j)} \mid x^{(i)}) - \mu_i\big) \nabla_\theta \log \pi_\theta\big(y^{(i,j)} \mid x^{(i)}\big), \tag{20}
 $$
 
-其中 $\mu_i = \frac{1}{G} \sum_{j=1}^{G} r(y^{(i,j)} \mid x^{(i)})$ 是模型在 prompt $x^{(i)}$ 上的平均奖励。
+其中 $\mu_i = \frac{1}{G} \sum_{j=1}^{G} r(y^{(i,j)} \mid x^{(i)})$ 是模型在 prompt $x^{(i)}$ 上的平均奖励。注意，尽管 $\mu_i$ 依赖于 response $y$，它仍然将期望保持到一个 $\frac{G-1}{G}$ 的缩放因子之内：
 
-注意，$\mu_i$ 虽然依赖于 response $y$，但它仍然保持估计器期望的正确性（上调至 $\frac{G-1}{G}$ 倍），相关推导见 PDF 公式 (21)–(24)。这些经过组均值调整的奖励通常称为**优势**——它们代表的是该 rollout 相对于平均奖励的"优势"。
+$$
+\begin{align}
+& E_{y^{(1)},\ldots,y^{(G)} \sim \pi_\theta(y|x)}\!\left[\frac{1}{G} \sum_{j=1}^{G} \big(r(y^{(j)} \mid x) - \mu_i\big) \nabla_\theta \log \pi_\theta(y^{(j)} \mid x)\right] \tag{21} \\[6pt]
+&= \frac{1}{G} \sum_{j=1}^{G} E_{y^{(2)},\ldots,y^{(G)} \sim \pi_\theta(y|x)}\!\left[E_{y^{(1)} \sim \pi_\theta(y|x)}\!\left[\big(r(y^{(1)} \mid x) - \mu_i\big) \nabla_\theta \log \pi_\theta(y^{(1)} \mid x)\right]\right] \tag{22} \\[6pt]
+&= \frac{1}{G} \sum_{j=1}^{G} E_{y^{(1)} \sim \pi_\theta(y|x)}\!\left[\left(r(y^{(1)} \mid x) - \frac{1}{G} r(y^{(1)} \mid x)\right) \nabla_\theta \log \pi_\theta(y^{(1)} \mid x)\right] \tag{23} \\[6pt]
+&= \frac{G-1}{G} E_{y \sim \pi_\theta(y|x)}\!\left[r(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x)\right]. \tag{24}
+\end{align}
+$$
+
+这些经过组均值调整的奖励通常被称为**优势（advantages）**：相比绝对奖励，这一项表示的是该 rollout 相对于平均奖励的"优势"。
 
 #### 4.1.6 优势归一化
 
@@ -449,33 +482,54 @@ $$
 \hat{g} \leftarrow \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{r(y^{(i,j)} \mid x^{(i)}) - \mu_i}{\text{std}_i} \nabla_\theta \left( \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \log \pi_\theta\big(y_t^{(i,j)} \mid x^{(i)}, y_{<t}^{(i,j)}\big) \right). \tag{27}
 $$
 
-这一修改改变了估计器的期望：相比对所有 token 等权重，较长序列中的 token 相对于较短序列中的 token 会被下调权重。在下一节中，我们将讨论这一选择并通过实验消融验证其是否是好的修改。
+这一修改改变了估计器的期望：相比对所有 token 等权重，较长序列中的 token 相对于较短序列中的 token 会被下调权重。在下一节中，我们将讨论这一选择并通过实验消融验证其是否是好的修改。但现在，我们先实现原论文中给出的标准 GRPO 算法，因此会包含序列归一化。
 
 #### 4.1.8 完整 GRPO 算法
 
-现在我们拥有了实现在策略 GRPO 所需的全部组件，完整算法如下：
+还有一个 GRPO 组件我们尚未讨论，即**截断重要性重加权（clipped importance reweighting）**。我们将在作业后面讨论离策略 RL 时再介绍它。简而言之，离策略 RL 指的是每个推理批次执行多步梯度更新以加速 RL，这与每个推理批次只走一步梯度的在策略 RL 相对。"离策略"一词指的是：从第二步梯度更新开始，推理批次中的样本就变"陈旧"了，因为它们来自模型的较旧版本。重要性重加权则是对梯度估计器的一种修改，使其能够使用这些陈旧样本。目前我们只做在策略 RL，因此暂时还不需要重要性重加权。
 
-**Algorithm 1（在策略 Group Relative Policy Optimization）**
+现在我们已经拥有了实现在策略 GRPO 所需的全部组件，完整算法见 Algorithm 1。
+
+![image-20260601182441842](./cs336_assignment5_alignment_zh.assets/image-20260601182441842.png)
+
+**Algorithm 1：在策略组相对策略优化（On-policy Group Relative Policy Optimization, GRPO）**
 
 **输入**：初始策略模型 $\pi_{\theta_0}$；奖励函数 $r$；任务分布（或数据集）$\rho$；学习率 $\alpha$
 
 **输出**：$\pi_\theta$
 
-```text
-1. 策略模型 π_θ ← π_{θ₀}
-2. 对 step = 1, ..., n_grpo_steps：
-3.   采样一批问题 x^(1), ..., x^(B) ~ ρ
-4.   对每个 prompt x^(i) 采样 G 个输出：y^(i,1), ..., y^(i,G) ~ π_θ(y | x^(i))
-     计算在策略 GRPO 策略梯度估计器：
+1. 策略模型 $\pi_\theta \leftarrow \pi_{\theta_0}$
+2. 对 $\text{step} = 1, \ldots, n\_grpo\_steps$：
+3. &nbsp;&nbsp;&nbsp;&nbsp;采样一批问题 $x^{(1)}, \ldots, x^{(B)} \overset{\text{iid}}{\sim} \rho$
+4. &nbsp;&nbsp;&nbsp;&nbsp;对每个问题采样 $G$ 个输出：$y^{(i,1)}, \ldots, y^{(i,G)} \overset{\text{iid}}{\sim} \pi_\theta(y \mid x^{(i)})$
 
-     g_hat ← (1/BG) Σᵢ Σⱼ (1/len(y^(i,j))) Σₜ [(r(y^(i,j)|x^(i)) - μᵢ) / std_i]
-                          · ∇_θ log π_θ(y_t^(i,j) | x^(i), y_{<t}^(i,j))    (28)
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;计算在策略 GRPO 策略梯度估计器：
 
-     其中 μᵢ = (1/G) Σⱼ r(y^(i,j) | x^(i))  （组均值，公式29）
-          std_i = sqrt[(1/G) Σⱼ (r(y^(i,j)|x^(i)) - μᵢ)²]  （组标准差，公式30）
+$$
+\hat{g} \leftarrow \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \frac{r(y^{(i,j)} \mid x^{(i)}) - \mu_i}{\text{std}_i} \nabla_\theta \log \pi_\theta\big(y_t^{(i,j)} \mid x^{(i)}, y_{<t}^{(i,j)}\big), \tag{28}
+$$
 
-5.   使用优化器更新 θ：θ ← θ + α·g_hat     （公式31）
-```
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;其中
+
+$$
+\mu_i = \frac{1}{G} \sum_{j=1}^{G} r(y^{(i,j)} \mid x^{(i)}) \tag{29}
+$$
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;表示组均值，
+
+$$
+\text{std}_i = \sqrt{\frac{1}{G} \sum_{j=1}^{G} \big(r(y^{(i,j)} \mid x^{(i)}) - \mu_i\big)^2} \tag{30}
+$$
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;表示组标准差。
+
+5. &nbsp;&nbsp;&nbsp;&nbsp;用你喜欢的优化器更新 $\theta$（下面给出随机梯度上升的更新式）：
+
+$$
+\theta \leftarrow \theta + \alpha \hat{g}. \tag{31}
+$$
+
+
 
 ### 4.2 实现在策略 GRPO
 
@@ -1012,17 +1066,25 @@ $$
 >
 > 回顾标准策略梯度为：
 >
-> $$\nabla_\theta J_\theta = \nabla_\theta E_{x \sim \rho}\big[E_{y \sim \pi_\theta} r(y \mid x)\big]. \tag{39}$$
+> $$
+> \nabla_\theta J_\theta = \nabla_\theta E_{x \sim \rho}\big[E_{y \sim \pi_\theta} r(y \mid x)\big]. \tag{39}
+> $$
+> 
 >
 > 在本问题中，我们将推导我们的 GRPO 变体优化的代理目标，这些代理目标具有如下形式：
 >
-> $$\nabla_\theta J_{\theta, w} = \nabla_\theta E_{x \sim \rho}\big[w(x, \text{stopgrad}(\pi_\theta)) E_{y \sim \pi_\theta} r(y \mid x)\big] \tag{40}$$
+> $$
+> \nabla_\theta J_{\theta, w} = \nabla_\theta E_{x \sim \rho}\big[w(x, \text{stopgrad}(\pi_\theta)) E_{y \sim \pi_\theta} r(y \mid x)\big] \tag{40}
+> $$
+> 
 >
 > 对某个关于 prompt 的重加权函数 $w$（我们不对 $w$ 求梯度）。
 >
 > **(a)** 回顾 Dr. GRPO 策略梯度估计器为：
->
-> $$E_{x \sim \rho}\left[\frac{1}{Z} \sum_{j=1}^{G} (r(y^{(j)} \mid x) - \mu) \nabla_\theta \log \pi_\theta(y^{(j)} \mid x)\right] \tag{41}$$
+> $$
+> E_{x \sim \rho}\left[\frac{1}{Z} \sum_{j=1}^{G} (r(y^{(j)} \mid x) - \mu) \nabla_\theta \log \pi_\theta(y^{(j)} \mid x)\right] \tag{41}
+> $$
+> 
 >
 > 其中 $\mu$ 表示组均值 $\mu = \frac{1}{G} \sum_{j=1}^{G} r(y^{(j)} \mid x)$。令常数归一化 $Z = G$ 并取组大小 $G \to \infty$，该估计器等价于优化哪个重加权函数 $w$ 的代理目标 $J_{\theta, w}$？
 >
@@ -1030,7 +1092,10 @@ $$
 >
 > **(b)** 假设常数归一化，GRPO 估计器与 Dr. GRPO 的区别在于它除以了标准差：
 >
-> $$E_{x \sim \rho}\left[\frac{1}{Z} \sum_{j=1}^{G} \frac{r(y^{(j)} \mid x) - \mu}{\text{std}} \nabla_\theta \log \pi_\theta(y^{(j)} \mid x)\right] \tag{42}$$
+> $$
+> E_{x \sim \rho}\left[\frac{1}{Z} \sum_{j=1}^{G} \frac{r(y^{(j)} \mid x) - \mu}{\text{std}} \nabla_\theta \log \pi_\theta(y^{(j)} \mid x)\right] \tag{42}
+> $$
+> 
 >
 > 令常数归一化 $Z = G$ 并取组大小 $G \to \infty$，该估计器等价于优化哪个重加权函数 $w$ 的代理目标 $J_{\theta, w}$？
 >
@@ -1038,7 +1103,10 @@ $$
 >
 > **(c)** MaxRL 改为除以组均值：
 >
-> $$E_{x \sim \rho}\left[\frac{1}{Z} \sum_{j=1}^{G} \frac{r(y^{(j)} \mid x) - \mu}{\mu} \nabla_\theta \log \pi_\theta(y^{(j)} \mid x)\right] \tag{43}$$
+> $$
+> E_{x \sim \rho}\left[\frac{1}{Z} \sum_{j=1}^{G} \frac{r(y^{(j)} \mid x) - \mu}{\mu} \nabla_\theta \log \pi_\theta(y^{(j)} \mid x)\right] \tag{43}
+> $$
+> 
 >
 > 令常数归一化 $Z = G$ 并取组大小 $G \to \infty$，该估计器等价于优化哪个重加权函数 $w$ 的代理目标 $J_{\theta, w}$？
 >
@@ -1129,13 +1197,17 @@ $$
 
 左边是我们"朴素的"离策略估计器——假装 response $y$ 来自当前策略，机械地套用相同步骤——但它没有正确的期望。
 
-**重要性采样纠偏**：通过重要性采样（importance sampling），可以得到无偏估计：
+**重要性重加权纠偏**：纠正这一偏差的一种办法是使用**重要性重加权（importance reweighting）**，得到如下估计器：
 
 $$
 E_{x \sim \rho} E_{y \sim \pi_0(y|x)}\left[\frac{\pi_\theta(y \mid x)}{\pi_0(y \mid x)} r(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x)\right], \tag{45}
 $$
 
-其中重要性权重 $\frac{\pi_\theta(y \mid x)}{\pi_0(y \mid x)}$ 上调了在当前策略 $\pi_\theta$ 下仍具有代表性的 $y$，下调了"陈旧"的（在 $\pi_\theta$ 下低概率的）样本。可以验证这一修改后的表达式具有正确的期望（公式 46）。
+其中我们引入了**重要性权重** $\frac{\pi_\theta(y \mid x)}{\pi_0(y \mid x)}$，它上调了在当前策略 $\pi_\theta$ 下仍具有代表性的 $y$，下调了"陈旧"的（在 $\pi_\theta$ 下低概率的）样本。不难看出这一修改后的表达式具有正确的期望：
+
+$$
+E_{x \sim \rho} E_{y \sim \pi_0(y|x)}\left[\frac{\pi_\theta(y \mid x)}{\pi_0(y \mid x)} r(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x)\right] = E_{x \sim \rho} E_{y \sim \pi_\theta(y|x)}[r(y \mid x) \nabla_\theta \log \pi_\theta(y \mid x)]. \tag{46}
+$$
 
 **代价**：重要性重加权增加了估计器的方差——若重要性权重 $\frac{\pi_\theta(y|x)}{\pi_0(y|x)}$ 最大可达 $C$，方差也会膨胀 $C$ 倍。这一问题对语言模型尤为严重，因为序列级重要性权重是 token 级重要性权重的乘积：
 
@@ -1157,73 +1229,105 @@ $$
 E_{x \sim \rho} E_{y \sim \pi_0(y|x)}\left[r(y \mid x) \sum_{t=1}^{\text{len}(y)} \frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_0(y_t \mid x, y_{<t})} \nabla_\theta \log \pi_\theta(y_t \mid x, y_{<t})\right]. \tag{48}
 $$
 
-与序列级重加权（其中重加权项随 response 长度指数增长）相比，这些重加权项不再随 $\text{len}(y)$ 呈指数增长，从而大幅降低方差。
-
-然而，token 级重加权引入了偏差：它优化的代理目标 $J_\theta^{\text{token}}$ 不是原始的期望奖励，而是对每个时刻 $t$，在以旧策略 $\pi_0$ 处理所有时刻（除 $t$ 外）时的期望奖励（公式 51）。直觉上，这些偏差来自两个方面：(1) 对于 $t$ 时刻，前缀 $y_{<t}$ 来自旧策略 $\pi_0$ 而非当前策略 $\pi_\theta$；(2) 评估 $t$ 时刻动作 $y_t$ 的效果时，后缀 $y_{>t}$ 来自 $\pi_0$ 而非 $\pi_\theta$。当 $\pi_\theta$ 离 $\pi_0$ 越远，这些偏差越严重。
-
-#### 6.2.2 截断
-
-除 token 级重加权之外，PPO 和 GRPO 还引入了**重要性权重截断**。当 $\pi_\theta$ 偏离 $\pi_0$ 越远，重加权带来的方差越大，代理目标的偏差也越大。为保证离策略 RL 的稳定性，需要确保 $\pi_\theta$ 与 $\pi_0$ 保持接近。
-
-结合 token 级重加权和标准 GRPO 目标（带 GRPO 优势和序列归一化），得到无截断版本的目标（`noclip`）：
+注意，上式与之前推导的"规范"序列级估计器不同——后者展开为：
 
 $$
-J_\theta^{\text{GRPO-off-policy-noclip}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \frac{r(y^{(i,j)} \mid x^{(i)}) - \mu_i}{\text{std}_i} \cdot \frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_0(y_t \mid x, y_{<t})}, \tag{56}
+E_{x \sim \rho} E_{y \sim \pi_0(y|x)}\left[r(y \mid x) \left(\prod_{t=1}^{\text{len}(y)} \frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_0(y_t \mid x, y_{<t})}\right) \sum_{t=1}^{\text{len}(y)} \nabla_\theta \log \pi_\theta(y_t \mid x, y_{<t})\right]. \tag{49}
 $$
 
-其中样本来自推理策略 $\pi_0$。
+与序列级重加权（重加权项随 response 长度呈指数增长）相比，token 级重加权项不再随 $\text{len}(y)$ 呈指数增长，从而大幅降低方差。
 
-令 $A^{(i,j)} = \frac{r(y^{(i,j)}|x^{(i)}) - \mu_i}{\text{std}_i}$ 为 response $j$ 对 prompt $i$ 的优势，$w_t^{(i,j)} = \frac{\pi_\theta(y_t|x, y_{<t})}{\pi_0(y_t|x, y_{<t})}$ 为第 $t$ 个重要性重加权项，加截断的版本为：
-
-$$
-J_\theta^{\text{GRPO-off-policy-clip}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \min\!\left(A^{(i,j)} w_t^{(i,j)},\; A^{(i,j)} \,\text{clip}\!\left(w_t^{(i,j)}, [1-\varepsilon, 1+\varepsilon]\right)\right), \tag{57}
-$$
-
-其中 $\text{clip}(w, [1-\varepsilon, 1+\varepsilon]) = \min(\max(w, 1-\varepsilon), 1+\varepsilon)$ 将重要性权重截断到 $[1-\varepsilon, 1+\varepsilon]$。
-
-更直观的等价写法为：
+为更深入理解 token 级重加权在优化什么，可以推导其代理目标（T. Degris et al., 2013）。设 $\tilde{\pi}_t$ 为代理策略：除第 $t$ 步从 $\pi_\theta$ 采样外，其余所有时刻均从旧策略 $\pi_0$ 采样：
 
 $$
-J_\theta^{\text{GRPO-off-policy-clip}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \begin{cases} \min\!\left(w_t^{(i,j)}, 1+\varepsilon\right) A^{(i,j)} & \text{若 } A^{(i,j)} \geq 0 \\ \max\!\left(w_t^{(i,j)}, 1-\varepsilon\right) A^{(i,j)} & \text{若 } A^{(i,j)} < 0 \end{cases}. \tag{58}
+\tilde{\pi}_t(y \mid x) = \left(\prod_{s=1}^{t-1} \pi_0(y_s \mid x, y_{<s})\right) \pi_\theta(y_t \mid x, y_{<t}) \left(\prod_{s=t+1}^{\text{len}(y)} \pi_0(y_s \mid x, y_{<s})\right). \tag{50}
 $$
 
-**截断的作用**：
-- 当 $A^{(i,j)} > 0$（鼓励该 response）：若 $w_t > 1+\varepsilon$，取更小的值（更保守），避免过度更新
-- 当 $A^{(i,j)} < 0$（抑制该 response）：若 $w_t < 1-\varepsilon$，取绝对值更小的值，避免过度惩罚
-
-对应的截断策略梯度估计器为：
+假设所有 response 长度均为 $L$，token 级重加权等价于优化各 $\tilde{\pi}_t$ 下期望奖励之和，即代理目标：
 
 $$
-\nabla_\theta J_\theta^{\text{GRPO-off-policy-clip}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \text{mask}_t^{(i,j)} w_t^{(i,j)} A^{(i,j)} \nabla_\theta \log \pi_\theta(y_t \mid x, y_{<t}) \tag{59}
+J_\theta^{\text{token}} = E_x\!\left[\sum_{t=1}^{L} E_{y \sim \tilde{\pi}_t(y \mid x)}[r(y \mid x)]\right]. \tag{51}
 $$
 
-其中 mask 函数屏蔽掉正优势下权重过大的 token，以及负优势下权重过小的 token：
+这一结论可由对代理目标进行重要性重加权改写直接验证：
 
 $$
-\text{mask}_t^{(i,j)} = \begin{cases} \mathbb{1}\{w_t^{(i,j)} < 1+\varepsilon\} & \text{若 } A^{(i,j)} \geq 0 \\ \mathbb{1}\{w_t^{(i,j)} > 1-\varepsilon\} & \text{若 } A^{(i,j)} < 0 \end{cases} \tag{60}
+\begin{align}
+\nabla_\theta J_\theta^{\text{token}} &= \nabla_\theta E_x\!\left[\sum_{t=1}^{L} E_{y \sim \tilde{\pi}_t(y \mid x)}[r(y \mid x)]\right] \tag{52} \\[6pt]
+&= \nabla_\theta E_x\!\left[\sum_{t=1}^{L} E_{y \sim \pi_0(y \mid x)}\!\left[\frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_0(y_t \mid x, y_{<t})} r(y \mid x)\right]\right] \tag{53} \\[6pt]
+&= E_x\!\left[E_{y \sim \pi_0(y \mid x)}\!\left[\sum_{t=1}^{L} \frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_0(y_t \mid x, y_{<t})} r(y \mid x) \nabla_\theta \log \pi_\theta(y_t \mid x, y_{<t})\right]\right]. \tag{54}
+\end{align}
 $$
 
-此外，还有一种更简单的"单边截断"方法（来自 CISPO，MiniMax et al., 2025），只对上界截断重要性权重：
+最后一步用到了对数导数技巧。
 
-$$
-\hat{g} \leftarrow \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \min\!\left(w_t^{(i,j)}, 1+\varepsilon\right) A^{(i,j)} \nabla_\theta \log \pi_\theta(y_t \mid x, y_{<t}), \tag{61}
-$$
+代理目标揭示了 token 级重加权引入偏差的直觉：
 
-与 PPO/GRPO 不同，这种方法对权重超过 $1+\varepsilon$ 的动作仍然取非零梯度。可选地，你也可以尝试并比较 CISPO 与其他截断方法。
+(1) 对于第 $t$ 项，前缀 $y_{<t}$ 来自旧策略 $\pi_0$ 而非当前策略 $\pi_\theta$，因此未必能代表当前模型的前缀分布；
+
+(2) 从 $\pi_\theta$ 采样动作 $y_t$ 后，后缀 $y_{>t}$ 来自 $\pi_0$ 而非 $\pi_\theta$——即目标在评估 $y_t$ 对未来步骤的影响时，依据的是旧策略 $\pi_0$ 的行为而非当前策略 $\pi_\theta$。
+
+序列级重加权通过正确重加权前缀和后缀来纠正这两类偏差（代价是方差增大）。$\pi_\theta$ 偏离 $\pi_0$ 越远，这些偏差越严重。
 
 ---
 
 > **Problem（`derive_surrogate_objectives`）：推导重要性重加权方法的代理目标（2 分）**
 >
-> 上面我们看到，token 级重要性重加权在每个时刻 $t$ 优化在策略 $\pi_t$（我们以旧策略 $\pi_0$ 处理所有时刻，但 $t$ 时刻从 $\pi_\theta$ 采样）下的期望奖励，即代理目标 $J_\theta^{\text{token}}$。
+> 上面我们看到，token 级重要性重加权在每个时刻 $t$ 优化在代理策略 $\tilde{\pi}_t$（除第 $t$ 步从 $\pi_\theta$ 采样外，其余时刻均来自旧策略 $\pi_0$）下的期望奖励，即代理目标 $J_\theta^{\text{token}}$。
 >
 > 现在考虑以下"成对"重要性重加权方法给出的策略梯度估计器：
 >
-> $$\sum_{t=1}^{L/2} \frac{\pi_\theta(y_{2t-1} \mid x, y_{<2t-1}) \pi_\theta(y_{2t} \mid x, y_{<2t})}{\pi_0(y_{2t-1} \mid x, y_{<2t-1}) \pi_0(y_{2t} \mid x, y_{<2t})} r(y \mid x) \nabla_\theta [\log(\pi_\theta(y_{2t-1} \mid x, y_{<2t-1}) \pi_\theta(y_{2t} \mid x, y_{<2t}))] \tag{55}$$
+> $$
+> \sum_{t=1}^{L/2} \frac{\pi_\theta(y_{2t-1} \mid x, y_{<2t-1}) \pi_\theta(y_{2t} \mid x, y_{<2t})}{\pi_0(y_{2t-1} \mid x, y_{<2t-1}) \pi_0(y_{2t} \mid x, y_{<2t})} r(y \mid x) \nabla_\theta \!\left[\log\!\left(\pi_\theta(y_{2t-1} \mid x, y_{<2t-1}) \pi_\theta(y_{2t} \mid x, y_{<2t})\right)\right] \tag{55}
+> $$
 >
 > 其中 $\pi_\theta$ 是当前策略，$\pi_0$ 是陈旧采样策略，$y \sim \pi_0(y \mid x)$。该估计器优化的是哪个代理目标？
 >
 > **交付物**：用问题参数子集表示的表达式，附推导过程。
+
+---
+
+#### 6.2.2 截断
+
+除 token 级重加权之外，PPO 和 GRPO 引入的另一个启发式方法是**重要性权重截断**。如上所述，当 $\pi_\theta$ 偏离 $\pi_0$ 越远，重要性重加权的方差越大。而我们的代理目标也表明，token 级重加权的偏差同样会随之加剧。因此，为保证离策略 RL 的稳定性，需要确保 $\pi_\theta$ 与 $\pi_0$ 保持接近。
+
+确保 $\pi_\theta$ 接近 $\pi_0$ 的最简单办法，是减少每个推理批次所执行的训练步数，但有些推理批次本可以支持更多步数。为了榨取算法的性能，我们希望在推理批次允许的范围内尽可能多地执行训练步。为此，有一类方法通过对过大或过小的重要性权重项进行截断来实现这一目标。
+
+近期论文对于截断的具体实现细节存在分歧，但本作业采用 PPO 的截断方案——它一直沿用到 GRPO，似乎是当前的主流做法。首先，将 token 级重加权与标准 GRPO 目标结合，得到如下 loss 函数：
+
+$$
+J_\theta^{\text{GRPO-off-policy-noclip}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \frac{r(y^{(i,j)} \mid x^{(i)}) - \mu_i}{\text{std}_i} \cdot \frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_0(y_t \mid x, y_{<t})}, \tag{56}
+$$
+
+其中样本来自我们陈旧的推理策略 $\pi_0$。可以验证，对该目标求导即可得到上面推导出的 token 重加权策略梯度估计器，只不过带上了 GRPO 优势和序列归一化。
+
+现在为该目标加上截断。令 $A^{(i,j)} = \frac{r(y^{(i,j)}|x^{(i)}) - \mu_i}{\text{std}_i}$ 为 response $j$ 对 prompt $i$ 的优势，$w_t^{(i,j)} = \frac{\pi_\theta(y_t|x, y_{<t})}{\pi_0(y_t|x, y_{<t})}$ 为第 $t$ 个重要性重加权项，则截断后的目标为：
+
+$$
+J_\theta^{\text{GRPO-off-policy-clip}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \min\!\left(A^{(i,j)} w_t^{(i,j)},\; A^{(i,j)} \,\text{clip}\!\left(w_t^{(i,j)}, [1-\varepsilon, 1+\varepsilon]\right)\right), \tag{57}
+$$
+
+其中 $\text{clip}(w, [1-\varepsilon, 1+\varepsilon]) = \min(\max(w, 1-\varepsilon), 1+\varepsilon)$ 将重要性权重截断到区间 $[1-\varepsilon, 1+\varepsilon]$。一种略微更直观的写法为（J. Achiam, 2018）：
+
+$$
+J_\theta^{\text{GRPO-off-policy-clip}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \begin{cases} \min\!\left(w_t^{(i,j)}, 1+\varepsilon\right) A^{(i,j)} & \text{若 } A^{(i,j)} \geq 0 \\ \max\!\left(w_t^{(i,j)}, 1-\varepsilon\right) A^{(i,j)} & \text{若 } A^{(i,j)} < 0 \end{cases}. \tag{58}
+$$
+
+在该目标下，对于高优势的动作，模型被激励去上调其权重，直到该动作的权重比旧策略高出 $1+\varepsilon$；此时 $\min$ 取 $1+\varepsilon$ 这一支，对其求导得到零梯度。负优势的动作类似：模型被激励去下调该动作的权重，直到其权重比旧策略低 $1-\varepsilon$，此时该动作的梯度变为零。于是对其求梯度，得到如下策略梯度估计器：
+
+$$
+\nabla_\theta J_\theta^{\text{GRPO-off-policy-clip}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \text{mask}_t^{(i,j)} w_t^{(i,j)} A^{(i,j)} \nabla_\theta \log \pi_\theta(y_t \mid x, y_{<t}) \tag{59}
+$$
+
+其中 mask 函数为：
+
+$$
+\text{mask}_t^{(i,j)} = \begin{cases} \mathbb{1}\{w_t^{(i,j)} < 1+\varepsilon\} & \text{若 } A^{(i,j)} \geq 0 \\ \mathbb{1}\{w_t^{(i,j)} > 1-\varepsilon\} & \text{若 } A^{(i,j)} < 0 \end{cases} \tag{60}
+$$
+
+它在正优势下屏蔽过大的重要性权重，在负优势下屏蔽过小的重要性权重。
+
+至此，我们已经具备了在 loss 函数中实现 `importance_reweighting_method = "noclip"` 和 `importance_reweighting_method = "grpo"` 所需的全部数学，二者分别对应 $J_\theta^{\text{GRPO-off-policy-noclip}}$ 和 $J_\theta^{\text{GRPO-off-policy-clip}}$。与在策略情形一样，loss 实现应返回负的目标值，使梯度下降执行我们想要的梯度上升更新。
 
 ---
 
@@ -1237,29 +1341,40 @@ $$
 
 ---
 
+注意：虽然截断在 PPO 中的动机是防止当前策略偏离旧策略过远，但它也可以被看作是降低重要性重加权估计器方差的一种手段——因为我们把过大的重要性权重项压缩了。如果我们不那么担心偏离旧策略、想要更激进地更新，那么控制方差还有一种简单得多、也更直接的办法：直接在梯度估计器中对重要性权重做上界截断：
+
+$$
+\hat{g} \leftarrow \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \min\!\left(w_t^{(i,j)}, 1+\varepsilon\right) A^{(i,j)} \nabla_\theta \log \pi_\theta(y_t \mid x, y_{<t}), \tag{61}
+$$
+
+与 PPO/GRPO 不同，这种方法对于那些被上调超过 $1+\varepsilon$ 的动作仍然取非零梯度。这种更简单的截断方案由 CISPO 提出（MiniMax et al., 2025）（注：他们还用每组 token 数而非每序列长度来归一化，但为简单起见我们写的是序列归一化的目标）。作为可选项，欢迎你尝试 CISPO 并与其他截断方法进行比较。
+
+---
+
 ### 6.3 GSPO
 
-如上所述，token 级重加权存在偏差，忽略了前缀和后缀的重加权。在 GSPO 论文（C. Zheng et al., 2025）中，作者发现 GRPO 不稳定，并主张应改用序列级重加权。
-
-**GSPO 的思路**：为避免序列级重要性权重随 $L$ 指数增长，GSPO 将表达式取 $\frac{1}{L}$ 次幂，即改用**序列级几何均值重要性权重**：
-
-$$
-s^{(i,j)} = \left(\prod_{t=1}^{\text{len}(y^{(i,j)})} \frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_0(y_t \mid x, y_{<t})}\right)^{\frac{1}{\text{len}(y^{(i,j)})}}. \tag{63}
-$$
-
-换言之，他们用序列级几何均值重要性权重代替 token 乘积，得到如下 loss 函数：
+如上所述，token 级重加权存在偏差，因为它忽略了对前缀和后缀的重加权。在 GSPO 论文（C. Zheng et al., 2025）中，作者发现 GRPO 不稳定，并主张应改用序列级重加权。为绕开序列级重要性权重是 $L$ 个项之乘积这一事实，他们干脆把该表达式取 $\frac{1}{L}$ 次幂。换言之，他们用序列上的**几何均值重要性权重**来重加权，而非乘积。由此得到如下 loss 函数：
 
 $$
 J_\theta^{\text{GRPO-off-policy-gspo}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} \min\!\left(A^{(i,j)} s^{(i,j)},\; A^{(i,j)} \,\text{clip}(s^{(i,j)}, [1-\varepsilon, 1+\varepsilon])\right). \tag{62}
 $$
 
-注意，$s^{(i,j)}$ 是一个序列级标量，在序列内所有时刻共享。取梯度时，由于 $s^{(i,j)}$ 中含有几何均值（即 $\frac{1}{\text{len}(y^{(i,j)})} \sum_t \log \pi_\theta$），自然产生序列长度归一化因子（忽略截断项，梯度公式 64–65）：
+其中我们现在有一个在所有时刻共享的序列级重要性权重 $s^{(i,j)}$：
 
 $$
-\nabla_\theta J_\theta^{\text{GRPO-off-policy-gspo}} = \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} A^{(i,j)} s^{(i,j)} \cdot \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \nabla_\theta \log \pi_\theta(y_t \mid x, y_{<t}). \tag{65}
+s^{(i,j)} = \left(\prod_{t=1}^{\text{len}(y^{(i,j)})} \frac{\pi_\theta(y_t \mid x, y_{<t})}{\pi_0(y_t \mid x, y_{<t})}\right)^{\frac{1}{\text{len}(y^{(i,j)})}}. \tag{63}
 $$
 
-**实现技巧**：在数值稳定的方式下计算几何均值：$\log s = \frac{1}{L} \sum_t (\log \pi_\theta - \log \pi_0)$，然后 $s = \exp(\log s)$。
+注意，若不取 $\frac{1}{\text{len}(y^{(i,j)})}$ 次幂、也不做截断，该目标就退化为序列级重要性重加权的策略梯度 loss。取几何均值与做截断都以引入偏差为代价来降低方差。还有一点值得注意：求梯度时，由于几何均值的指数，我们自然得到了序列长度归一化（为简洁起见，下式忽略截断）：
+
+$$
+\begin{align}
+\nabla_\theta J_\theta^{\text{GRPO-off-policy-gspo}} &= \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} A^{(i,j)} \nabla_\theta s^{(i,j)} \tag{64} \\[6pt]
+&= \frac{1}{BG} \sum_{i=1}^{B} \sum_{j=1}^{G} A^{(i,j)} s^{(i,j)} \frac{1}{\text{len}(y^{(i,j)})} \sum_{t=1}^{\text{len}(y^{(i,j)})} \nabla_\theta \log \pi_\theta(y_t \mid x, y_{<t}). \tag{65}
+\end{align}
+$$
+
+因此，如果你想把 GSPO 应用到你最喜欢的常数归一化 RL 算法上（可选），你需要改变序列级重要性权重中的指数。
 
 ---
 
@@ -1273,11 +1388,11 @@ $$
 
 ---
 
+下面这道题中，我们将实现 GSPO loss。记得以数值稳定的方式计算几何均值。
+
 > **Problem（`compute_policy_gradient_loss_off_policy_gspo`）：带序列级重加权的离策略策略梯度（1 分）**
 >
-> **交付物**：更新你的 `compute_policy_gradient_loss` 方法，支持 `importance_reweighting_method = "gspo"`，使用 `old_log_probs` 和 `cliprange` 参数。`old_log_probs` 是生成 rollout 时所用模型的 per-token log 概率；`cliprange` 是截断强度参数 $\varepsilon$。注意以数值稳定的方式计算几何均值。
->
-> 返回负目标值作为 loss，使最小化 loss 等价于梯度上升。
+> **交付物**：更新你的 `compute_policy_gradient_loss` 方法，支持 `importance_reweighting_method = "gspo"`，使用 `old_log_probs` 和 `cliprange` 参数。`old_log_probs` 是生成 rollout 时所用模型的 per-token log 概率；`cliprange` 是截断强度参数 $\varepsilon$。如上所述，返回负的目标值，使最小化 loss 等价于梯度上升。
 >
 > 实现适配器 `[adapters.run_compute_policy_gradient_loss]`，运行 `uv run pytest -k test_compute_policy_gradient_loss_off_policy_gspo`。
 
@@ -1285,7 +1400,7 @@ $$
 
 ### 6.4 实验
 
-现在拥有了更新 `grpo_train_step` 方法以支持离策略训练所需的所有组件。
+现在我们已经具备了更新 `grpo_train_step` 方法以支持离策略训练所需的全部组件。
 
 ---
 
