@@ -524,6 +524,9 @@ def grpo_train_step(
             return_token_entropy=False,
         )
         policy_lp = lp_dict["log_probs"]
+        # 你会发现这里和作为模型输出的rollout_responses重复了，明明可以复用。
+        # 不这么做是因为两者往往不是同一时间生成的，比如rollout_responses是用户调用模型生成的答案，过几个月再训练时才用到。
+        # 另外，后训练涉及多次更新模型参数，之前的log probs就不再准确了，所以只能重新计算。
 
         # 计算 per-token 策略梯度 loss
         per_token_loss, pg_meta = compute_policy_gradient_loss(
@@ -549,12 +552,12 @@ def grpo_train_step(
         #   sequence 规范化：mb_loss = mean(seq_losses)，需除以 G 使梯度等价于全 batch 平均
         #   constant 规范化：mb_loss = sum/C，已包含全 batch 正确缩放，无需再除 G
         if loss_normalization == "sequence":
-            backward_loss = mb_loss / gradient_accumulation_steps
+            backward_loss = mb_loss / gradient_accumulation_steps #因为只做了backward没有归零，所以要除以外面的for循环步数G
         else:
             backward_loss = mb_loss
         backward_loss.backward()
 
-        total_loss_val += mb_loss.detach().item()
+        total_loss_val += mb_loss.detach().item() #只是为了打印，所以detach掉计算图
 
     # 返回真实批次 loss：sequence 取平均（除以 G），constant 直接返回总和/C
     if loss_normalization == "sequence":
@@ -566,6 +569,10 @@ def grpo_train_step(
         grad_norm = torch.nn.utils.clip_grad_norm_(
             model.parameters(), max_grad_norm
         ).item()
+    # 这是 PyTorch 内置的梯度裁剪函数，做了两件事：
+    # 1. 计算所有参数的总梯度范数（L2 norm），得到 grad_norm
+    # 2. 如果 grad_norm > max_grad_norm，则按等比例缩放所有参数的梯度，使得新的范数等于 max_grad_norm
+    # 这样可以防止梯度爆炸，保持训练稳定性。
 
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
